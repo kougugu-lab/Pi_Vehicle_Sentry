@@ -7,6 +7,7 @@ GPIOTestDialog, SettingsDialog
 
 import json
 import os
+import sys
 import time
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -41,6 +42,71 @@ try:
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
+
+
+def _activate_toplevel(win, parent):
+    """Linux/Raspberry Pi で Toplevel がクリックを受け取れない問題への対処。"""
+    try:
+        win.transient(parent)
+    except tk.TclError:
+        pass
+    if sys.platform.startswith("linux"):
+        try:
+            win.wm_attributes("-type", "dialog")
+        except tk.TclError:
+            pass
+    try:
+        parent.update_idletasks()
+        win.update_idletasks()
+        win.deiconify()
+        win.lift()
+    except tk.TclError:
+        pass
+    try:
+        win.wait_visibility()
+    except tk.TclError:
+        pass
+
+    def _apply_focus():
+        if not win.winfo_exists():
+            return
+        try:
+            win.attributes("-topmost", True)
+            win.lift()
+            win.focus_force()
+            win.focus_set()
+        except tk.TclError:
+            pass
+        try:
+            win.attributes("-topmost", False)
+        except tk.TclError:
+            pass
+        # Linux では grab_set が WM のフォーカスと競合し、初回クリックが効かないことがある
+        if sys.platform == "win32":
+            try:
+                if not win.grab_current():
+                    win.grab_set()
+            except tk.TclError:
+                pass
+
+    win.after_idle(_apply_focus)
+    if sys.platform.startswith("linux"):
+        win.after(100, _apply_focus)
+        win.after(300, _apply_focus)
+
+
+def _release_toplevel_modal(win):
+    """Toplevel のモーダル状態を解除する。"""
+    try:
+        current = win.grab_current()
+        if current and str(current) == str(win):
+            win.grab_release()
+    except tk.TclError:
+        pass
+    try:
+        win.attributes("-topmost", False)
+    except tk.TclError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -122,11 +188,16 @@ class GPIOTestDialog(tk.Toplevel):
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, settings, on_close_callback):
         super().__init__(parent)
+        self._parent_window = parent
         self.settings = settings
         self.on_close_callback = on_close_callback
         self.title("詳細設定")
         self.geometry("1400x900")
         self.configure(bg=COLOR_BG_MAIN)
+        try:
+            self.transient(parent)
+        except tk.TclError:
+            pass
         self.temp_data = json.loads(json.dumps(self.settings.data))
         self.has_changes = False
         self.model_classes = self._get_model_classes()
@@ -202,14 +273,12 @@ class SettingsDialog(tk.Toplevel):
         # Combobox のドロップダウンリストのフォントを大きく設定
         self.option_add("*TCombobox*Listbox.font", FONT_SET_VAL)
 
-        # Linux/Raspberry Pi (Wayland) でのフォーカス・クリック不良回避のための修正
-        self.lift()
-        self.focus_force()
-        # 画面の描画とOS側への登録が完了するのを待ってから入力を独占する (遅延が重要)
-        self.after(200, self.grab_set)
+        # Linux/Raspberry Pi: 描画完了後にフォーカスを設定（grab_set は Linux では使用しない）
+        _activate_toplevel(self, parent)
 
     def on_cancel(self):
         """キャンセル時やウィンドウを閉じた際もプレビュー再開を保証する"""
+        _release_toplevel_modal(self)
         self._release_gpio_test_output()
         if hasattr(self, "_live_preview_win") and self._live_preview_win.winfo_exists():
             self._live_preview_win.destroy()
@@ -1445,104 +1514,7 @@ class SettingsDialog(tk.Toplevel):
 
         threading.Thread(target=_calc_storage, daemon=True).start()
 
-<<<<<<< HEAD
 
-=======
-        # グループ6: 生産ライン同期設定
-        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        g6 = _make_group(scroll_f, "生産ライン同期設定")
-        st_sys = self.temp_data.setdefault("system", {})
-
-        r_step = _row_frame(g6)
-        v_step = tk.BooleanVar(value=bool(st_sys.get("commit_half_step", False)))
-        cb_step = tk.Checkbutton(
-            r_step, text="コミット番号を0.5刻みで進める (ドアライン対応)",
-            variable=v_step, onvalue=True, offvalue=False,
-            font=FONT_SET_VAL, bg=COLOR_BG_PANEL, fg=COLOR_TEXT_MAIN,
-            activebackground=COLOR_BG_PANEL, activeforeground=COLOR_TEXT_MAIN,
-            selectcolor=COLOR_BG_INPUT, relief="flat"
-        )
-        cb_step.pack(side=tk.LEFT)
-        Tooltip(cb_step, "ONにすると、コミット番号が1.0, 1.5, 2.0... のように0.5刻みでカウントアップされます。1つのコミット内で同じトリガーが2回入るラインに対応します。")
-        
-        def _format_delay_value(val, half_step):
-            try:
-                num = float(val)
-            except (TypeError, ValueError):
-                return "0"
-            if half_step:
-                if abs(num - round(num)) < 1e-9:
-                    return str(int(round(num)))
-                return f"{num:.1f}"
-            return str(int(num))
-
-        def _apply_delay_spinbox_mode():
-            half = v_step.get()
-            if half:
-                delay_sp.config(from_=0.0, to=99.0, increment=0.5)
-                delay_unit_lbl.config(
-                    text="サイクル（0.5刻みで設定可能、0で遅延なし）"
-                )
-            else:
-                delay_sp.config(from_=0, to=99, increment=1)
-                delay_unit_lbl.config(
-                    text="サイクル（整数のみ、0で遅延なし）"
-                )
-
-        def _upd_step(*a):
-            st_sys["commit_half_step"] = v_step.get()
-            _apply_delay_spinbox_mode()
-            if not v_step.get():
-                try:
-                    num = float(v_delay.get())
-                    if abs(num - int(num)) > 1e-9:
-                        v_delay.set(str(int(num)))
-                except (TypeError, ValueError):
-                    pass
-            self._mark_changed()
-        v_step.trace_add("write", _upd_step)
-
-        r_delay = _row_frame(g6)
-        _lbl(r_delay, "仕様情報遅延サイクル数:", "トリガー時に取得した仕様情報を、何サイクル（コミット数）後に実際の検査に適用するかを指定します。")
-        half_init = bool(st_sys.get("commit_half_step", False))
-        v_delay = tk.StringVar(value=_format_delay_value(st_sys.get("delay_cycles", 0), half_init))
-        self._last_valid_delay_str = v_delay.get()
-        self._delay_revert_guard = False
-        delay_sp = self._spinbox(r_delay, v_delay, 0.0, 99.0, 0.5, width=8)
-        delay_sp.pack(side=tk.LEFT)
-        delay_unit_lbl = _unit(r_delay, "サイクル（0.5刻みで設定可能、0で遅延なし）")
-        _apply_delay_spinbox_mode()
-
-        def _upd_delay(*a):
-            if self._delay_revert_guard:
-                return
-            val = v_delay.get().strip()
-            if val in ("", "-", ".", "-."):
-                return
-            try:
-                num = float(val)
-            except ValueError:
-                return
-            if not v_step.get():
-                if abs(num - int(num)) > 1e-9:
-                    self._delay_revert_guard = True
-                    v_delay.set(self._last_valid_delay_str)
-                    self._delay_revert_guard = False
-                    messagebox.showerror(
-                        "入力エラー",
-                        "0.5刻みモードがOFFのとき、遅延サイクル数は整数のみ指定できます。",
-                        parent=self,
-                    )
-                    return
-                st_sys["delay_cycles"] = int(num)
-                self._last_valid_delay_str = str(int(num))
-            else:
-                st_sys["delay_cycles"] = num
-                self._last_valid_delay_str = _format_delay_value(num, True)
-            self._mark_changed()
-
-        v_delay.trace_add("write", _upd_delay)
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 
     # ---- 保存 / GPIO テスト ----
 
@@ -1595,28 +1567,6 @@ class SettingsDialog(tk.Toplevel):
         if not self.validate_pins():
             return
 
-<<<<<<< HEAD
-=======
-        if not self._validate_delay_cycles():
-            return
-
-        # バリデーション: 全パターンの入力ピン条件が重複していないかチェック
-        pin_map = {} # { tuple_condition: [pattern_names] }
-        for pid, p in self.temp_data["patterns"].items():
-            cond = tuple(p.get("pin_condition", []))
-            if cond not in pin_map:
-                pin_map[cond] = []
-            pin_map[cond].append(p.get("name", pid))
-        
-        duplicates = [names for names in pin_map.values() if len(names) > 1]
-        if duplicates:
-            msg = "以下のパターンで同じ入力ピン条件が設定されています。判定が曖昧になるため修正してください:\n\n"
-            for names in duplicates:
-                msg += f"・{', '.join(names)}\n"
-            messagebox.showwarning("バリデーションエラー", msg, parent=self)
-            return
-
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
         # 保存先フォルダのバリデーション (書き込み権限チェック)
         res_dir = self.temp_data["storage"].get("results_dir", "")
         if res_dir:
@@ -1637,12 +1587,8 @@ class SettingsDialog(tk.Toplevel):
         self.settings.data = self.temp_data
         self.settings.save_settings()
 
-<<<<<<< HEAD
-=======
-        if hasattr(self.master, "app_instance"):
-            self.master.app_instance.reset_delay_pattern_queue()
+        _release_toplevel_modal(self)
 
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
         if hasattr(self, "_live_preview_win") and self._live_preview_win.winfo_exists():
             self._live_preview_win.destroy()
             

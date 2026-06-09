@@ -22,17 +22,12 @@ from pathlib import Path
 from .constants import (
     RESULTS_DIR, COLOR_BG_MAIN, COLOR_BG_PANEL, COLOR_BG_INPUT,
     COLOR_TEXT_MAIN, COLOR_TEXT_SUB, COLOR_ACCENT, COLOR_OK, COLOR_NG, COLOR_WARNING,
-<<<<<<< HEAD
     FONT_BOLD, FONT_LARGE, FONT_NORMAL, FONT_FAMILY, VERSION
-=======
-    FONT_BOLD, FONT_LARGE, FONT_HUGE, FONT_NORMAL, FONT_FAMILY, VERSION,
-    DELAYED_SKIP_PATTERN_ID,
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 )
 from .hardware import OutputDevice, is_gpio_available, MockManager
 from .settings import SettingsManager
 from .widgets import create_card, Tooltip, HelpWindow, TenKeyDialog, get_commit_display_style
-from .dialogs import SettingsDialog
+from .dialogs import SettingsDialog, _activate_toplevel
 
 try:
     import pygame
@@ -63,14 +58,6 @@ class InspectionSystem:
         self.setup_dirs()
         self.setup_logging()
 
-<<<<<<< HEAD
-=======
-        self.commit_number = 1
-        self.ng_history = []
-        self.delay_pattern_queue = []
-        self.elapsed_cycles = 0.0
-        self.cycle_is_delayed_skip = False
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
         self.running = True
         self.camera_lock = threading.Lock()
         self.caps = {}
@@ -95,6 +82,7 @@ class InspectionSystem:
         self.preview_paused = False
         self.inspecting = False
         self.settings_open = False
+        self._settings_dialog = None
         self.manual_capture_trigger = False
         self.btn_manual_capture = None
 
@@ -159,7 +147,7 @@ class InspectionSystem:
     def _build_live_detections(self, frame):
         """リアルタイム監視用にYOLO推論を実行し、検出結果を返す。"""
         cfg = self._get_alert_config()
-        if not cfg.get("enabled", True) or self.inspecting or not self.model:
+        if self.inspecting or not self.model:
             return []
 
         try:
@@ -589,6 +577,14 @@ class InspectionSystem:
                 self.logger.info(f"カメラ(インデックス {cam['index']})を初期化しました: {cam['name']}")
             else:
                 self.logger.error(f"カメラ(インデックス {cam['index']})を開けませんでした")
+            # 既存の out_ng を安全にクローズして解放
+            if hasattr(self, "out_ng") and self.out_ng is not None:
+                try:
+                    self.out_ng.off()
+                    self.out_ng.close()
+                except Exception:
+                    pass
+                self.out_ng = None
             # NG出力のみ
             self.out_ng = OutputDevice(data["gpio"]["outputs"]["ng"])
         except Exception as e:
@@ -722,7 +718,6 @@ class InspectionSystem:
         # リアルタイム監視ステータス
         tk.Label(pnl, text="監視ステータス", font=FONT_BOLD,
                  bg=COLOR_BG_PANEL, fg=COLOR_TEXT_SUB).pack(pady=(5, 2))
-<<<<<<< HEAD
         self.lbl_monitor_status = tk.Label(pnl, text="監視中", font=FONT_LARGE,
                                            bg=COLOR_BG_INPUT, fg=COLOR_OK, pady=5)
         self.lbl_monitor_status.pack(fill=tk.X, padx=10)
@@ -736,22 +731,6 @@ class InspectionSystem:
         self.update_manual_capture_visibility()
 
         tk.Button(pnl, text="結果フォルダ", font=FONT_NORMAL, bg="#546E7A",
-=======
-        cf = tk.Frame(pnl, bg=COLOR_BG_PANEL)
-        cf.pack(pady=5)
-        tk.Button(cf, text="－", font=FONT_LARGE, bg=COLOR_BG_INPUT,
-                  fg=COLOR_TEXT_MAIN, width=3, relief="flat",
-                  command=lambda: self.adjust_commit(-1)).pack(side=tk.LEFT)
-        self.v_commit = tk.StringVar(value="0001")
-        self.lbl_commit = tk.Label(cf, textvariable=self.v_commit,
-                                   bg=COLOR_BG_INPUT, fg=COLOR_ACCENT)
-        self.update_commit_display()
-        self.lbl_commit.pack(side=tk.LEFT, padx=10)
-        tk.Button(cf, text="＋", font=FONT_LARGE, bg=COLOR_BG_INPUT,
-                  fg=COLOR_TEXT_MAIN, width=3, relief="flat",
-                  command=lambda: self.adjust_commit(1)).pack(side=tk.LEFT)
-        tk.Button(pnl, text="番号入力", font=FONT_NORMAL, bg="#546E7A",
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
                   fg="white", relief="flat",
                   command=self.open_results_folder).pack(fill=tk.X, padx=10, pady=5)
         tk.Button(pnl, text="詳細設定", font=FONT_BOLD, bg="#455A64",
@@ -906,15 +885,10 @@ class InspectionSystem:
         commit_font, commit_width = get_commit_display_style(
             bool(self.settings.data.get("system", {}).get("commit_half_step", False))
         )
-<<<<<<< HEAD
         if hasattr(self, "lbl_commit") and self.lbl_commit.winfo_exists():
             self.lbl_commit.config(font=commit_font, width=commit_width)
         if hasattr(self, "v_commit"):
             self.v_commit.set(self.get_commit_str())
-=======
-        self.lbl_commit.config(font=commit_font, width=commit_width)
-        self.v_commit.set(self.get_commit_str())
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 
     def manual_commit_set(self):
         is_half_step = bool(self.settings.data.get("system", {}).get("commit_half_step", False))
@@ -976,20 +950,9 @@ class InspectionSystem:
         # 削除済み - NG履歴ビューアは廃止されました
         pass
 
-<<<<<<< HEAD
     def clear_history(self):
         # 削除済み - NG履歴は廃止されました
         pass
-=======
-        # 同コミット番号の全ファイルを対象に絞り込む
-        commit_str = rec.get("commit_str")
-        if not commit_str:
-            try:
-                commit_str = f"{int(rec['commit']):04d}"
-            except:
-                commit_str = str(rec['commit'])
-        all_imgs = sorted(dir_ng.glob(f"NG_{commit_str}_*"))
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 
     def update_mode_ui(self):
         """モード変更時にUIを更新"""
@@ -1006,14 +969,9 @@ class InspectionSystem:
         # 撮影モード時に手動撮影ボタンの表示・非表示を切り替え
         self.update_manual_capture_visibility()
 
-<<<<<<< HEAD
     def _capture_and_save_manual(self, frame, camera_id, burst_index=1):
         """手動撮影モードで現在のフレームを保存する"""
         if frame is None or frame.size == 0:
-=======
-        if not imgs:
-            messagebox.showinfo("情報", f"#{commit_str} の画像ファイルが見つかりません。\n保存先: {dir_ng}")
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
             return
         try:
             res_key = "res_record"
@@ -1026,7 +984,6 @@ class InspectionSystem:
                     save_frame = cv2.resize(frame, (w, h))
                 except Exception: pass
 
-<<<<<<< HEAD
             # ファイル名: REC_タイムスタンプ_連番.jpg
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
             filename = f"REC_{timestamp}_{burst_index:02d}.jpg"
@@ -1043,73 +1000,6 @@ class InspectionSystem:
             threading.Thread(target=_do_write, args=(save_path, save_frame, filename), daemon=True).start()
         except Exception as e:
             self.logger.error(f"手動撮影処理エラー: {e}")
-=======
-        # ---- スクロール対応の大きな画像ビューワー ----
-        top = tk.Toplevel(self.root)
-        top.title(f"NG詳細 #{commit_str} ({len(imgs)}枚)")
-        top.configure(bg=COLOR_BG_MAIN)
-        top.transient(self.root)
-
-        # ウィンドウサイズを画面の85%に設定
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        win_w = int(sw * 0.85)
-        win_h = int(sh * 0.85)
-        top.geometry(f"{win_w}x{win_h}")
-
-        # タイトルラベル
-        tk.Label(top, text=f"NG #{commit_str} — {len(imgs)}枚", font=FONT_LARGE,
-                 bg=COLOR_BG_MAIN, fg=COLOR_NG).pack(pady=(10, 0))
-
-        # スクロール可能フレーム
-        frame_outer = tk.Frame(top, bg=COLOR_BG_MAIN)
-        frame_outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        canvas_scroll = tk.Canvas(frame_outer, bg=COLOR_BG_MAIN, highlightthickness=0)
-        scrollbar = tk.Scrollbar(frame_outer, orient=tk.VERTICAL, command=canvas_scroll.yview)
-        canvas_scroll.configure(yscrollcommand=scrollbar.set)
-
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        inner = tk.Frame(canvas_scroll, bg=COLOR_BG_MAIN)
-        canvas_scroll.create_window((0, 0), window=inner, anchor="nw")
-
-        def _on_inner_configure(event):
-            canvas_scroll.configure(scrollregion=canvas_scroll.bbox("all"))
-        inner.bind("<Configure>", _on_inner_configure)
-
-        # マウスホイールでスクロール
-        def _on_mousewheel(event):
-            canvas_scroll.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        canvas_scroll.bind_all("<MouseWheel>", _on_mousewheel)
-        top.bind("<Destroy>", lambda e: canvas_scroll.unbind_all("<MouseWheel>"))
-
-        # 画像を縦に並べて表示
-        img_max_w = int(win_w * 0.82)
-        img_max_h = int(sh * 0.65)
-
-        for f in imgs:
-            try:
-                im = Image.open(f)
-                im.thumbnail((img_max_w, img_max_h), Image.LANCZOS)
-                t_im = ImageTk.PhotoImage(im)
-
-                # ファイル名ラベル
-                tk.Label(inner, text=f.name, font=FONT_NORMAL,
-                         bg=COLOR_BG_MAIN, fg=COLOR_TEXT_SUB).pack(anchor="w", padx=10, pady=(10, 2))
-                # 画像ラベル
-                lbl = tk.Label(inner, image=t_im, bg=COLOR_BG_MAIN)
-                lbl.image = t_im  # 参照保持
-                lbl.pack(padx=10, pady=(0, 5))
-            except Exception as ex:
-                self.logger.error(f"NG画像読み込みエラー: {f.name} - {ex}")
-
-        # 閉じるボタン
-        tk.Button(top, text="閉じる", font=FONT_BOLD, bg="#546E7A", fg="white",
-                  relief="flat", padx=20,
-                  command=top.destroy).pack(pady=10)
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 
     def show_main_help(self):
         help_data = {
@@ -1146,25 +1036,38 @@ class InspectionSystem:
         # 
         # for cap in temp_caps.values():
         #     cap.release()
+        dlg = getattr(self, "_settings_dialog", None)
+        if dlg is not None:
+            try:
+                if dlg.winfo_exists():
+                    _activate_toplevel(dlg, self.root)
+                    return
+            except tk.TclError:
+                pass
+
         self.settings_open = True
         self.logger.info("設定画面を開きました。設定画面が閉じるまで検査処理をスキップします。")
-        SettingsDialog(self.root, self.settings, self.on_settings_closed)
+        # GPIOの競合を防ぐため、設定画面を開く前に既存のGPIOデバイスを解放する
+        if hasattr(self, "out_ng") and self.out_ng is not None:
+            try:
+                self.out_ng.off()
+                self.out_ng.close()
+            except Exception:
+                pass
+            self.out_ng = None
+        self._settings_dialog = SettingsDialog(self.root, self.settings, self.on_settings_closed)
 
     def reset_delay_pattern_queue(self):
         """仕様情報遅延キューと経過サイクル数をリセットする"""
         self.delay_pattern_queue.clear()
         self.elapsed_cycles = 0.0
         self.cycle_is_delayed_skip = False
-<<<<<<< HEAD
         self.cycle_active_pat_id = None
-=======
-        if self.cycle_active_pat_id == DELAYED_SKIP_PATTERN_ID:
-            self.cycle_active_pat_id = None
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
         self.logger.info("仕様情報遅延キューをリセットしました")
 
     def on_settings_closed(self):
         self.settings_open = False
+        self._settings_dialog = None
         self.logger.info("設定画面が閉じられました。検査処理を再開します。")
         self.setup_hardware()
         self.v_mode.set(self.settings.data["inference"].get("mode", "inspection"))
@@ -1597,276 +1500,11 @@ class InspectionSystem:
         """操作パネルの監視ステータス表示を更新する"""
         if not getattr(self, "lbl_monitor_status", None):
             return
-<<<<<<< HEAD
         try:
             if self.lbl_monitor_status.winfo_exists():
                 self.lbl_monitor_status.config(text=text, fg=color)
         except tk.TclError:
             pass
-=======
-
-        expected_trig = trig_list[self.cycle_trig_idx]
-        if trig_id != expected_trig:
-            expected_name = next((t["name"] for t in d["gpio"]["triggers"] if t["id"] == expected_trig), expected_trig)
-            received_name = next((t["name"] for t in d["gpio"]["triggers"] if t["id"] == trig_id), trig_id)
-            self.logger.warning(f"順序外のトリガーを無視: 受信={received_name}, 期待={expected_name}")
-            return
-
-        # --- ステータス表示 (正当なトリガーの場合のみ) ---
-        status_msg = "撮影中..." if mode == "recording" else "検査中..."
-        self.update_status(status_msg, COLOR_ACCENT)
-        
-        # 検査中フラグを立てる（プレビュー停止）
-        self.inspecting = True
-
-        # 1つ目のトリガーが入った時点でその時のセレクター状態でパターンを固定する
-        # cycle_active_pat_id が None でも、遅延SKIP中は専用IDが入るため fired_trigs で判定する
-        if self.cycle_active_pat_id is None and len(self.cycle_fired_trigs) == 0:
-            raw_pat_id = self.get_current_pattern()
-
-            # --- 遅延キュー制御 ---
-            # delay_cycles が設定されている場合、パターン情報はキューに積んで
-            # 指定サイクル後に取り出す（仕様情報の保存機能）
-            st_sys = self.settings.data.get("system", {})
-            delay_cycles = float(st_sys.get("delay_cycles", 0))
-
-            if delay_cycles > 0:
-                # キューにパターン情報を積む
-                self.delay_pattern_queue.append(raw_pat_id)
-
-                if self.elapsed_cycles < delay_cycles:
-                    # 遅延期間中: キューから消費せず、今サイクルは SKIP 扱い
-                    self.cycle_active_pat_id = DELAYED_SKIP_PATTERN_ID
-                    self.cycle_is_delayed_skip = True
-                    self.logger.info(
-                        f"[遅延キュー] 蓄積中 ({self.elapsed_cycles:.1f}/{delay_cycles:.1f} サイクル完了)。"
-                        f" キュー長={len(self.delay_pattern_queue)}"
-                    )
-                else:
-                    # 遅延完了: キューの先頭を取り出して今サイクルに適用
-                    applied_pat_id = self.delay_pattern_queue.pop(0) if self.delay_pattern_queue else None
-                    self.cycle_active_pat_id = applied_pat_id
-                    self.cycle_is_delayed_skip = False
-                    self.logger.info(
-                        f"[遅延キュー] パターン適用: {applied_pat_id}。"
-                        f" キュー残={len(self.delay_pattern_queue)}"
-                    )
-            else:
-                # 遅延なし: そのまま適用
-                self.cycle_active_pat_id = raw_pat_id
-                self.cycle_is_delayed_skip = False
-
-            self.cycle_fired_trigs = set()
-            self.cycle_trig_idx = 0 # 念のため
-            # ログ出力はパターンの名前が確定した後で行う
-
-        # 固定されたパターンを使用
-        pat_id = self.cycle_active_pat_id
-        if (
-            not pat_id
-            or pat_id == DELAYED_SKIP_PATTERN_ID
-            or getattr(self, 'cycle_is_delayed_skip', False)
-        ):
-            pat_name = "SKIP"
-            is_skip = True
-            # スキップ時も他のパターンと同様、全トリガーを消化してからサイクル完了とする
-            required_trig_ids = set(trig_list)
-        else:
-            pat = d["patterns"][pat_id]
-            pat_name = pat["name"]
-            is_skip = False
-            # このパターンに必要なトリガーを取得。
-            # ただし GPIO に実際に設定されているトリガーのうち、
-            # 条件が設定されている（1つ以上ある）トリガーのみに絞る
-            # (設定トリガーが1つだけの場合でも正常にサイクルが完了できるようにする)
-            configured_trig_ids = set(t["id"] for t in d["gpio"]["triggers"])
-            required_trig_ids = set(
-                tid for tid, stage in pat["stages"].items() 
-                if stage.get("conditions")
-            ) & configured_trig_ids
-            
-            if not required_trig_ids:
-                # 全てのトリガーが条件なしの場合、少なくとも自分自身で完了する
-                required_trig_ids = {trig_id}
-
-        # 1つ目のトリガーの場合のみ開始ログ（名前解決後）
-        if len(self.cycle_fired_trigs) == 0:
-            self.logger.info(f"--- サイクル開始 (パターン: {pat_name}) ---")
-
-        self.v_pat_name.set(pat_name)
-        self.cycle_fired_trigs.add(trig_id)
-        self.cycle_trig_idx += 1 # 次のトリガーへ
-        if self.cycle_trig_idx >= len(trig_list):
-            self.cycle_trig_idx = 0 # リストの最後まで来たら先頭に戻る
-
-        # トリガー名を取得 (保存用)
-        trig_info = next((t for t in d["gpio"]["triggers"] if t["id"] == trig_id), None)
-        trig_name = trig_info["name"] if trig_info else str(trig_id)
-
-        # --- 先行バースト撮影 ---
-        # スキップパターン時はリトライなし（判定なしで保存のみなので1フレームのみ）
-        retries = 1 if is_skip else inference_cfg.get("max_retries", 5)
-        interval = inference_cfg.get("burst_interval", 0.5)
-        captured_frames = self._capture_burst_images(retries, interval)
-
-        # --- 判定処理 ---
-        results, final_best_frames = self._inspect_frames(
-            captured_frames, mode, is_skip, pat_id, trig_id, pat_name, trig_name
-        )
-
-        # --- 保存 & 記録 ---
-        if mode == "recording":
-            self.update_status(f"撮影保存完了 (#{self.commit_number:04d})", COLOR_OK)
-            # 撮影モード時は少し長めに完了表示を出し、連続動作を防ぐ（0.5秒程度）
-            time.sleep(1) 
-            self.update_status("撮影モード 待機中", COLOR_ACCENT)
-        elif mode == "inspection":
-            display_frames = {}
-            for (cid, cam_name), (frame, raw_frame, res_type, conf, cls_name, det_cnt) in final_best_frames.items():
-                self.logger.info(f"判定結果: カメラ={cam_name}, 条件={cls_name}, 検出数={det_cnt}, 結果={res_type}, 信頼度={conf:.2f}")
-                res_setting = d["storage"].get(f"res_{res_type.lower()}", "640x480")
-                if res_setting != "保存しない":
-                    self.save_result_images(res_type, frame, cam_name, pat_name, 
-                                            confidence=conf, trig_name=trig_name)
-                    if res_type == "NG":
-                        self.save_result_images(RESULTS_SUBDIR_NG_RAW, raw_frame, cam_name, pat_name,
-                                                confidence=conf, trig_name=trig_name)
-                self.append_to_csv(pat_name, cam_name, cls_name, det_cnt, res_type, conf)
-
-                if res_type == "NG":
-                    self.add_history(trig_id) # NG履歴にも現在のコミット番号で追加
-
-                # プレビュー表示用のリサイズ & PIL.Image変換 (Tkinter非依存)
-                preview_res = self.settings.data["storage"].get("preview_res", "320x240")
-                try:
-                    pw, ph = map(int, preview_res.split('x'))
-                except Exception: pw, ph = 320, 240
-                
-                rgb = cv2.cvtColor(cv2.resize(frame, (pw, ph)), cv2.COLOR_BGR2RGB)
-                display_frames[cid] = Image.fromarray(rgb)
-
-            # 結果表示タイマー開始
-            self.result_display_frames = display_frames
-            display_time = d["inference"].get("result_display_time", 2.0)
-            self.result_display_until = time.time() + display_time
-
-        # --- サイクル完了判定 ---
-        # 1. パターンに設定された「必要なトリガー」を全て消化した場合
-        # 2. または、ハードウェア設定されている全トリガーの順序を一周した場合 (物理的なワークの入れ替わり)
-        is_cycle_complete = required_trig_ids.issubset(self.cycle_fired_trigs)
-        
-        # ハードウェアトリガーが1つの場合は常に完了とみなす
-        if len(trig_list) <= 1:
-            is_cycle_complete = True
-        # 最後のトリガーを終えてインデックスが0に戻った場合も強制完了 (シーケンスの同期)
-        # トリガーリストを一周したときのみ（1回目の処理で idx==0 の誤完了を防ぐ）
-        elif self.cycle_trig_idx == 0 and len(self.cycle_fired_trigs) >= len(trig_list):
-            is_cycle_complete = True
-
-        if is_cycle_complete:
-            self.logger.info(f"--- サイクル完了 ({self.get_commit_str()}) ---")
-
-            # elapsed_cycles を 1 ステップ（0.5 or 1.0）加算
-            st_sys = self.settings.data.get("system", {})
-            is_half_step = bool(st_sys.get("commit_half_step", False))
-            cycle_step = 0.5 if is_half_step else 1.0
-            self.elapsed_cycles += cycle_step
-
-            self.adjust_commit(1)    # ここで初めて次の番号へ
-            self.cycle_active_pat_id = None
-            self.cycle_is_delayed_skip = False
-            self.cycle_fired_trigs.clear()
-            self.cycle_trig_idx = 0  # 念のためリセット
-            self.clear_trigger_queue()  # サイクル完了時に余分なトリガーを破棄
-        else:
-            next_trig_id = trig_list[self.cycle_trig_idx]
-            next_trig_name = next((t["name"] for t in d["gpio"]["triggers"] if t["id"] == next_trig_id), str(next_trig_id))
-            self.logger.info(f"サイクル継続中 (進捗: {len(self.cycle_fired_trigs)}/{len(required_trig_ids)}, 次待機: {next_trig_name})")
-
-        # --- 出灯 / ブザー制御 (検査モードのみ) ---
-        if mode != "inspection":
-            return
-
-        ok_time = inference_cfg.get("ok_output_time", 0.5)
-        ng_time = inference_cfg.get("ng_output_time", "")
-        has_ng = "NG" in results
-        has_ok = "OK" in results
-
-        if has_ng:
-            # 1つでもNGがあれば総合判定NG
-            self.update_status(f"NG検出 ({pat_name})", COLOR_NG)
-            # OK出力は確実にOFFにする
-            if self.out_ok:
-                self.out_ok.off()
-
-            # --- NG GPIO出力制御 ---
-            # 空白: ブザー停止ボタンを押すまで出力し続ける
-            # 0秒: 出力しない
-            # N秒: N秒間出力してから自動OFF
-            if self.out_ng:
-                ng_time_str = str(ng_time).strip() if ng_time is not None else ""
-                if ng_time_str == "":
-                    # 空白設定: 常時出力（ブザー停止ボタンで手動OFF）
-                    self.out_ng.on()
-                else:
-                    try:
-                        ng_sec = float(ng_time_str)
-                        if ng_sec > 0:
-                            self.out_ng.on()
-                            ng_msec = int(ng_sec * 1000)
-                            def _ng_off():
-                                if self.out_ng:
-                                    self.out_ng.off()
-                            self.root.after(max(10, ng_msec), _ng_off)
-                        # ng_sec <= 0: 出力しない
-                    except ValueError:
-                        pass
-
-            # --- ブザー制御 ---
-            bp = inference_cfg.get("buzzer_path", "")
-            if bp and PYGAME_AVAILABLE and os.path.exists(bp):
-                try:
-                    _ensure_mixer()
-                    pygame.mixer.music.load(bp)
-                    pygame.mixer.music.play(-1)
-                except: pass
-
-        elif results and all(r in ("OK", "SKIP") for r in results):
-            # 全てOKまたはSKIPならOKステータス（1つでもOKがあればOK色）
-            status_color = COLOR_OK if "OK" in results else COLOR_BG_PANEL
-
-            if "OK" in results:
-                self.update_status(f"OK ({pat_name})", status_color)
-                # OK出力時には必ずNG出力をオフにする
-                if self.out_ng:
-                    try:
-                        self.out_ng.off()
-                    except: pass
-                if self.out_ok:
-                    try:
-                        self.out_ok.on()
-                        ok_msec = int(ok_time * 1000)
-                        def _ok_off():
-                            try:
-                                if self.out_ok: self.out_ok.off()
-                            except: pass
-                        self.root.after(max(10, ok_msec), _ok_off)
-                    except: pass
-
-                ok_bp = inference_cfg.get("ok_buzzer_path", "")
-                if ok_bp and PYGAME_AVAILABLE and os.path.exists(ok_bp):
-                    try:
-                        _ensure_mixer()
-                        pygame.mixer.music.load(ok_bp)
-                        pygame.mixer.music.play(0)
-                    except: pass
-            
-            elif "SKIP" in results:
-                self.update_status(f"SKIP ({pat_name})", COLOR_BG_PANEL)
-        
-        # 検査完了後、検査中フラグを解除してプレビュー再開
-        self.inspecting = False
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 
     def update_status(self, text, color):
         """ステータス表示とヘッダー色の更新"""
@@ -1882,18 +1520,8 @@ class InspectionSystem:
             except: pass
 
     def add_history(self, trig_id):
-<<<<<<< HEAD
         # 削除済み - NG履歴は廃止されました
         pass
-=======
-        now = datetime.datetime.now()
-        t_str = now.strftime("%m/%d %H:%M:%S")
-        commit_str = self.get_commit_str()
-        # 'time' を記録しておくことで、同一コミット番号でも今回のセッションの画像のみ特定できる
-        self.ng_history.append({"commit": self.commit_number, "commit_str": commit_str, "trigger": trig_id, "time": now})
-        # Listbox操作はメインスレッド経由で実行（Tkinterスレッドセーフ対応）
-        self.root.after(0, lambda: self.lb_history.insert(0, f"[{t_str}] #{commit_str} NG"))
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
 
     def clear_trigger_queue(self):
         """トリガーキューに溜まっているイベントをすべて破棄する"""

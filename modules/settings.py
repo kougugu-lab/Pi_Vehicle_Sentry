@@ -41,7 +41,6 @@ class SettingsManager:
                 "results_dir": os.path.join(os.path.expanduser("~"), "results"),
                 "auto_delete_enabled": True,
                 "max_results_gb": round(shutil.disk_usage(os.path.expanduser("~")).total / (1024**3), 1),
-<<<<<<< HEAD
                 # 解像度デフォルト値
                 # 撮影解像度: Full HD, プレビュー: HD,
                 # 検出時保存: VGA, 撮影保存: Full HD
@@ -54,18 +53,6 @@ class SettingsManager:
                 "ng_output_time": 2.0,
                 "max_retries": 5,
                 "burst_interval": 0.5
-=======
-                "capture_res": "1920x1080",
-                "preview_res": "640x480",
-                "res_ok": "320x240",
-                "res_ng": "1920x1080",
-                "res_skip": "320x240",
-                "res_record": "1920x1080"
-            },
-            "system": {
-                "commit_half_step": False,
-                "delay_cycles": 0.0
->>>>>>> ac4e2c9439837f386afe67a422cbbd94894f4150
             }
         }
         self.data = self.load_settings()
