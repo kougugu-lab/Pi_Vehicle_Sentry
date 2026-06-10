@@ -35,7 +35,8 @@ class SettingsManager:
                     "ymin": 120,
                     "xmax": 900,
                     "ymax": 560
-                }
+                },
+                "roi_polygon": None
             },
             "storage": {
                 "results_dir": os.path.join(os.path.expanduser("~"), "results"),

@@ -71,11 +71,6 @@ class InspectionSystem:
         self.alert_confirm_hits = 0
         self.alert_frame_counter = 0
         self._cached_alert_detections = []
-        self._draft_roi = None
-        self.roi_dragging = False
-        self.roi_drag_start = None
-        self.roi_drag_end = None
-        self.roi_edit_cam = None
 
         self.result_display_frames = {}
         self.result_display_until = 0
@@ -126,14 +121,32 @@ class InspectionSystem:
         return {"xmin": x1, "ymin": y1, "xmax": x2, "ymax": y2}
 
     def _get_current_roi(self, frame_w=None, frame_h=None):
-        """ドラッグ中の仮ROIがあれば優先し、なければ保存済みROIを返す。"""
-        roi = self._draft_roi or self.settings.data.get("inference", {}).get("roi")
+        """保存済みROIを返す。"""
+        roi = self.settings.data.get("inference", {}).get("roi")
         if frame_w is None or frame_h is None:
             return roi
         return self._normalize_roi(roi, frame_w, frame_h)
 
-    def _has_detection_in_roi(self, detections, roi):
-        """検出ボックスの中心点がROI内に入っているか判定する。"""
+    def _get_current_polygon(self, frame_w, frame_h):
+        """正規化されたroi_polygon座標をピクセル座標に変換して返す。"""
+        pts = self.settings.data.get("inference", {}).get("roi_polygon")
+        if pts and len(pts) >= 3:
+            return [(int(x * frame_w), int(y * frame_h)) for x, y in pts]
+        return None
+
+    def _has_detection_in_roi(self, detections, frame_w, frame_h, roi):
+        """検出ボックスの中心点がROI（多角形または矩形）内に入っているか判定する。"""
+        polygon = self._get_current_polygon(frame_w, frame_h)
+        if polygon:
+            import numpy as np
+            np_pts = np.array(polygon, np.int32).reshape((-1, 1, 2))
+            for det in detections:
+                cx = (det["x1"] + det["x2"]) / 2.0
+                cy = (det["y1"] + det["y2"]) / 2.0
+                if cv2.pointPolygonTest(np_pts, (cx, cy), False) >= 0:
+                    return True
+            return False
+
         if roi is None:
             return False
 
@@ -143,6 +156,9 @@ class InspectionSystem:
             if roi["xmin"] <= cx <= roi["xmax"] and roi["ymin"] <= cy <= roi["ymax"]:
                 return True
         return False
+
+
+
 
     def _build_live_detections(self, frame):
         """リアルタイム監視用にYOLO推論を実行し、検出結果を返す。"""
@@ -191,7 +207,8 @@ class InspectionSystem:
 
         roi = self._get_current_roi(frame.shape[1], frame.shape[0])
         # ダミー接近検知が有効な場合は強制的に検知ありとみなす
-        inside_roi = self._has_detection_in_roi(detections, roi) or getattr(self, "dummy_detection_active", False)
+        inside_roi = self._has_detection_in_roi(detections, frame.shape[1], frame.shape[0], roi) or getattr(self, "dummy_detection_active", False)
+
 
         if inside_roi:
             self.alert_confirm_hits += 1
@@ -241,9 +258,17 @@ class InspectionSystem:
 
     def _draw_monitor_overlay(self, frame, detections, alert_active):
         """リアルタイム監視用のROIと検出枠を描画する。"""
-        roi = self._get_current_roi(frame.shape[1], frame.shape[0])
+        frame_h, frame_w = frame.shape[:2]
+        pts = self._get_current_polygon(frame_w, frame_h)
         color = (0, 0, 255) if alert_active else (0, 255, 0)
-        cv2.rectangle(frame, (roi["xmin"], roi["ymin"]), (roi["xmax"], roi["ymax"]), color, 2)
+        if pts:
+            import numpy as np
+            np_pts = np.array(pts, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(frame, [np_pts], isClosed=True, color=color, thickness=2)
+        else:
+            roi = self._get_current_roi(frame_w, frame_h)
+            cv2.rectangle(frame, (roi["xmin"], roi["ymin"]), (roi["xmax"], roi["ymax"]), color, 2)
+
 
 
         for det in detections:
@@ -309,68 +334,6 @@ class InspectionSystem:
         else:
             self.logger.error(f"検知画像の保存に失敗しました: {out_path}")
 
-    def _start_roi_edit(self, cam_id, event):
-        """プレビュー上でROIのドラッグ編集を開始する。"""
-        frame = self.last_frames.get(cam_id)
-        if frame is None:
-            return
-
-        self.roi_dragging = True
-        self.roi_edit_cam = cam_id
-        self.roi_drag_start = self._label_to_frame_coords(cam_id, event.x, event.y)
-        self.roi_drag_end = self.roi_drag_start
-        self._draft_roi = self._normalize_roi({
-            "xmin": self.roi_drag_start[0],
-            "ymin": self.roi_drag_start[1],
-            "xmax": self.roi_drag_start[0],
-            "ymax": self.roi_drag_start[1],
-        }, frame.shape[1], frame.shape[0])
-        self.root.config(cursor="crosshair")
-
-    def _update_roi_edit(self, cam_id, event):
-        """ドラッグ中のROIを更新する。"""
-        if not self.roi_dragging or cam_id != self.roi_edit_cam:
-            return
-        self.roi_drag_end = self._label_to_frame_coords(cam_id, event.x, event.y)
-        self._draft_roi = self._normalize_roi({
-            "xmin": min(self.roi_drag_start[0], self.roi_drag_end[0]),
-            "ymin": min(self.roi_drag_start[1], self.roi_drag_end[1]),
-            "xmax": max(self.roi_drag_start[0], self.roi_drag_end[0]),
-            "ymax": max(self.roi_drag_start[1], self.roi_drag_end[1]),
-        }, self.last_frames[cam_id].shape[1], self.last_frames[cam_id].shape[0])
-
-    def _finish_roi_edit(self, cam_id, event):
-        """ROI編集を確定し、設定を保存する。"""
-        if not self.roi_dragging or cam_id != self.roi_edit_cam:
-            return
-        self._update_roi_edit(cam_id, event)
-        self.roi_dragging = False
-        self.roi_drag_start = None
-        self.roi_drag_end = None
-        self.roi_edit_cam = None
-        self.root.config(cursor="")
-
-        if self._draft_roi is not None:
-            self.settings.data.setdefault("inference", {})["roi"] = self._draft_roi.copy()
-            self.settings.save_settings()
-            self.logger.info(f"検知エリアを更新しました: {self._draft_roi}")
-        self._draft_roi = None
-
-    def _label_to_frame_coords(self, cam_id, x, y):
-        """Tkinter上の座標を実フレーム座標へ変換する。"""
-        label = self.cam_labels.get(cam_id)
-        frame = self.last_frames.get(cam_id)
-        if label is None or frame is None:
-            return (0, 0)
-
-        label_w = max(1, label.winfo_width())
-        label_h = max(1, label.winfo_height())
-        frame_w = frame.shape[1]
-        frame_h = frame.shape[0]
-        return (
-            max(0, min(frame_w - 1, int(x * frame_w / label_w))),
-            max(0, min(frame_h - 1, int(y * frame_h / label_h))),
-        )
 
     def setup_mock_ui(self):
         """モックモード時の仮想GPIO操作パネル (Windowsデバッグ用)"""
@@ -700,9 +663,9 @@ class InspectionSystem:
             l = tk.Label(f, bg="black")
             l.pack(fill=tk.BOTH, expand=True)
             self.cam_labels[c["id"]] = l
-            l.bind("<ButtonPress-1>", lambda e, cid=c["id"]: self._start_roi_edit(cid, e))
-            l.bind("<B1-Motion>", lambda e, cid=c["id"]: self._update_roi_edit(cid, e))
-            l.bind("<ButtonRelease-1>", lambda e, cid=c["id"]: self._finish_roi_edit(cid, e))
+
+
+
 
         for i in range(rows):
             self.v_frm.rowconfigure(i, weight=1)

@@ -248,9 +248,12 @@ class SettingsDialog(tk.Toplevel):
 
         nb = ttk.Notebook(self)
         nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=20, pady=20)
+        nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         self.t_cam = tk.Frame(nb, bg=COLOR_BG_MAIN)
         nb.add(self.t_cam, text=" カメラ ")
+        self.t_roi = tk.Frame(nb, bg=COLOR_BG_MAIN)
+        nb.add(self.t_roi, text=" 検知エリア ")
         self.t_gpio = tk.Frame(nb, bg=COLOR_BG_MAIN)
         nb.add(self.t_gpio, text=" GPIOピン ")
         self.t_res = tk.Frame(nb, bg=COLOR_BG_MAIN)
@@ -258,10 +261,36 @@ class SettingsDialog(tk.Toplevel):
         self.t_sys = tk.Frame(nb, bg=COLOR_BG_MAIN)
         nb.add(self.t_sys, text=" システム ")
 
+        # ROI設定用の状態変数
+        self._roi_points = []
+        self._roi_picking = False
+        self._roi_preview_running = False
+
+        # 既存の roi_polygon があればロード、なければ roi (矩形) から生成してロード
+        pts = self.temp_data.get("inference", {}).get("roi_polygon")
+        if pts and len(pts) >= 3:
+            self._roi_points = [list(pt) for pt in pts]
+        else:
+            roi = self.temp_data.get("inference", {}).get("roi")
+            res_str = self.temp_data.get("storage", {}).get("capture_res", "1920x1080")
+            try:
+                w, h = map(int, res_str.split("x"))
+            except Exception:
+                w, h = 1920, 1080
+            if roi and all(k in roi for k in ("xmin", "ymin", "xmax", "ymax")):
+                self._roi_points = [
+                    [roi["xmin"] / w, roi["ymin"] / h],
+                    [roi["xmax"] / w, roi["ymin"] / h],
+                    [roi["xmax"] / w, roi["ymax"] / h],
+                    [roi["xmin"] / w, roi["ymax"] / h]
+                ]
+
         self.setup_cam()
+        self.setup_roi()
         self.setup_gpio()
         self.setup_res()
         self.setup_sys()
+
 
         btn_help = tk.Button(btn_f, text="ヘルプ", font=FONT_SET_LBL,
                              bg=COLOR_BG_INPUT, fg=COLOR_ACCENT,
@@ -1640,3 +1669,179 @@ class SettingsDialog(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("GPIOエラー", f"出力の切り替えに失敗しました:\n{e}", parent=self)
             self._release_gpio_test_output()
+
+    # ---- 検知エリア（ROI）タブ ----
+    def setup_roi(self):
+        outer, inner = create_card(self.t_roi, "検知エリア設定（多角形ピック）")
+        outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        # 左右分割フレーム
+        body = tk.Frame(inner, bg=COLOR_BG_PANEL)
+        body.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        # 左側: カメラ映像
+        self._roi_canvas = tk.Canvas(body, width=640, height=480, bg="black", highlightthickness=0)
+        self._roi_canvas.pack(side=tk.LEFT, padx=(0, 20), pady=10)
+        self._roi_canvas.bind("<Button-1>", self._on_roi_canvas_click)
+
+        # 右側: 操作パネル
+        ctrl_f = tk.Frame(body, bg=COLOR_BG_PANEL)
+        ctrl_f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=10)
+
+        self._btn_roi_pick = tk.Button(ctrl_f, text="ピック開始", font=FONT_BTN_LARGE,
+                                       bg="#546E7A", fg="white", relief="flat", height=2,
+                                       command=self._toggle_roi_picking)
+        self._btn_roi_pick.pack(fill=tk.X, pady=5)
+        Tooltip(self._btn_roi_pick, "クリックで映像上に頂点（点）を追加できる状態にします。")
+
+        self._btn_roi_decide = tk.Button(ctrl_f, text="決定", font=FONT_BTN_LARGE,
+                                         bg=COLOR_OK, fg="black", relief="flat", height=2,
+                                         command=self._decide_roi_polygon)
+        self._btn_roi_decide.pack(fill=tk.X, pady=5)
+        Tooltip(self._btn_roi_decide, "現在の頂点で多角形（3点以上）を確定します。")
+
+        self._btn_roi_reset = tk.Button(ctrl_f, text="リセット", font=FONT_BTN_LARGE,
+                                        bg="#B0BEC5", fg="black", relief="flat", height=2,
+                                        command=self._reset_roi_polygon)
+        self._btn_roi_reset.pack(fill=tk.X, pady=5)
+        Tooltip(self._btn_roi_reset, "ピックした頂点をすべて消去し、最初からやり直します。")
+
+        # ヒント・解説
+        hint_lbl = tk.Label(ctrl_f, text="【操作方法】\n"
+                                         "1. 「ピック開始」を押します。\n"
+                                         "2. 左のプレビュー映像上をクリックして、\n"
+                                         "   検知したいエリアの頂点（3点以上）を\n"
+                                         "   順番に指定します。\n"
+                                         "3. 「決定」ボタンで確定します。\n"
+                                         "4. 最後に「保存して閉じる」を押して\n"
+                                         "   設定を保存してください。\n\n"
+                                         "※ 3点以上の多角形のみ有効です。",
+                            font=FONT_NORMAL, bg=COLOR_BG_PANEL, fg=COLOR_TEXT_SUB,
+                            justify=tk.LEFT, anchor="nw")
+        hint_lbl.pack(fill=tk.BOTH, expand=True, pady=(20, 0))
+
+    def _on_tab_changed(self, event):
+        nb = event.widget
+        selected_tab = nb.tab(nb.select(), "text").strip()
+        if selected_tab == "検知エリア":
+            self._start_roi_preview()
+        else:
+            self._stop_roi_preview()
+
+    def _start_roi_preview(self):
+        if not self._roi_preview_running:
+            self._roi_preview_running = True
+            self._roi_preview_loop()
+
+    def _stop_roi_preview(self):
+        self._roi_preview_running = False
+
+    def _roi_preview_loop(self):
+        if not self._roi_preview_running or not self.winfo_exists():
+            return
+
+        frame = self._roi_read_frame()
+        if frame is not None:
+            # 640x480にアスペクト比固定またはリサイズ
+            frame_resized = cv2.resize(frame, (640, 480))
+            frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+
+            # 点と線を描画
+            pts = self._roi_points
+            color = (0, 255, 0) if not self._roi_picking else (255, 165, 0)  # 通常時は緑、ピック時はオレンジ
+            
+            # 線を描画
+            if len(pts) >= 2:
+                for idx in range(len(pts) - 1):
+                    p1 = (int(pts[idx][0] * 640), int(pts[idx][1] * 480))
+                    p2 = (int(pts[idx+1][0] * 640), int(pts[idx+1][1] * 480))
+                    cv2.line(frame_rgb, p1, p2, color, 2)
+                
+                # 決定済み、あるいは3点以上ピックした場合は閉じる
+                if not self._roi_picking or len(pts) >= 3:
+                    p1 = (int(pts[-1][0] * 640), int(pts[-1][1] * 480))
+                    p2 = (int(pts[0][0] * 640), int(pts[0][1] * 480))
+                    cv2.line(frame_rgb, p1, p2, color, 2)
+
+            # 点を描画
+            for idx, pt in enumerate(pts):
+                px = int(pt[0] * 640)
+                py = int(pt[1] * 480)
+                # 頂点円
+                cv2.circle(frame_rgb, (px, py), 6, color, -1)
+                # 番号テキスト
+                cv2.putText(frame_rgb, str(idx + 1), (px - 4, py + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+
+            # Canvasに描画
+            img = Image.fromarray(frame_rgb)
+            photo = ImageTk.PhotoImage(image=img)
+            self._roi_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+            self._roi_canvas.image = photo
+        else:
+            # カメラ映像が取得できない場合は黒画面にテキスト
+            self._roi_canvas.delete("all")
+            self._roi_canvas.create_text(320, 240, text="カメラ映像が取得できません", fill="white", font=FONT_NORMAL)
+
+        # 100ms後に再呼び出し
+        self.after(100, self._roi_preview_loop)
+
+    def _roi_read_frame(self):
+        """アプリのcapsからフレームを取得する。取得できなければ新しくVideoCaptureを開いてフォールバックする。"""
+        app = getattr(self.master, "app_instance", None)
+        if app:
+            with app.camera_lock:
+                cap = next(iter(app.caps.values()), None)
+                if cap and cap.isOpened():
+                    ret, frame = cap.read()
+                    if ret:
+                        return frame
+
+        # フォールバック: カメラインデックスを直接開く
+        if self.temp_data["cameras"]:
+            cidx = self.temp_data["cameras"][0].get("index", 0)
+            try:
+                cap = cv2.VideoCapture(int(cidx))
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret:
+                        return frame
+            except Exception:
+                pass
+        return None
+
+    def _on_roi_canvas_click(self, event):
+        if not self._roi_picking:
+            return
+        # キャンバスサイズ(640x480)で正規化して座標を追加
+        norm_x = max(0.0, min(1.0, event.x / 640.0))
+        norm_y = max(0.0, min(1.0, event.y / 480.0))
+        self._roi_points.append([norm_x, norm_y])
+
+    def _toggle_roi_picking(self):
+        self._roi_picking = not self._roi_picking
+        if self._roi_picking:
+            self._btn_roi_pick.config(text="ピック中 (クリックで点追加)", bg=COLOR_WARNING, fg="black")
+        else:
+            self._btn_roi_pick.config(text="ピック開始", bg="#546E7A", fg="white")
+
+    def _decide_roi_polygon(self):
+        if len(self._roi_points) < 3:
+            messagebox.showerror("エラー", "検知エリアは3点以上の多角形で指定してください。", parent=self)
+            return
+
+        self._roi_picking = False
+        self._btn_roi_pick.config(text="ピック開始", bg="#546E7A", fg="white")
+        self.temp_data.setdefault("inference", {})["roi_polygon"] = [list(pt) for pt in self._roi_points]
+        self._mark_changed()
+        messagebox.showinfo("確定", "検知エリアを確定しました。保存ボタンを押すことで変更が保存されます。", parent=self)
+
+    def _reset_roi_polygon(self):
+        if messagebox.askyesno("リセット", "ピックしたすべての頂点をクリアしますか？", parent=self):
+            self._roi_points = []
+            self.temp_data.setdefault("inference", {})["roi_polygon"] = None
+            self._roi_picking = False
+            self._btn_roi_pick.config(text="ピック開始", bg="#546E7A", fg="white")
+            self._mark_changed()
+
