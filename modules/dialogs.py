@@ -29,6 +29,7 @@ if __name__ == "__main__" or __package__ is None:
 from .constants import (
     COLOR_BG_MAIN, COLOR_BG_PANEL, COLOR_BG_INPUT,
     COLOR_TEXT_MAIN, COLOR_TEXT_SUB, COLOR_ACCENT, COLOR_OK, COLOR_NG, COLOR_NG_MUTED, COLOR_WARNING,
+    COLOR_BORDER,
     FONT_FAMILY, FONT_NORMAL, FONT_BOLD, FONT_LARGE,
     FONT_SET_TAB, FONT_SET_LBL, FONT_SET_VAL, FONT_BTN_LARGE,
     RES_OPTIONS, RES_OPTIONS_PREVIEW, RES_OPTIONS_SAVE,
@@ -1323,23 +1324,96 @@ class SettingsDialog(tk.Toplevel):
             self._mark_changed()
         v_thr.trace_add("write", _upd_thr)
 
-        # --- 監視対象クラス (ドロップダウン: モデルクラス + すべてのクラス) ---
-        r_alert_cls = _row_frame(g1)
-        _lbl(r_alert_cls, "監視対象クラス:", "接近を検知する対象クラスを選択します。「すべてのクラス」は全ての検出物が対象になります。")
-        _all_label = "すべてのクラス"
-        model_classes = [_all_label] + self._get_model_classes()[1:]  # ["", ...] -> [_all_label, ...]
-        curr_cls = str(s.get("alert_target_classes", _all_label)).strip()
-        if curr_cls not in model_classes:
-            model_classes.append(curr_cls)
-        v_alert_cls = tk.StringVar(value=curr_cls if curr_cls else _all_label)
-        cb_cls = ttk.Combobox(r_alert_cls, textvariable=v_alert_cls, values=model_classes,
-                              font=FONT_SET_VAL, state="readonly", width=20)
-        cb_cls.pack(side=tk.LEFT)
-        def _upd_alert_cls(*a):
-            val = v_alert_cls.get()
-            s["alert_target_classes"] = "" if val == _all_label else val
+        # --- 監視対象クラス (チェックボックス形式での複数選択) ---
+        r_alert_cls_hdr = _row_frame(g1)
+        _lbl(r_alert_cls_hdr, "監視対象クラス:", "接近を検知する対象クラスを選択します。")
+        
+        # クラス名のリストを取得 (空文字を除去)
+        model_classes = [c for c in self._get_model_classes() if c]
+        if not model_classes:
+            # フォールバック: モデルが読み込めていない等の場合は一般的な主要クラスを表示
+            model_classes = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat"]
+            
+        self._class_vars = {}
+        for cls in model_classes:
+            self._class_vars[cls] = tk.BooleanVar(value=False)
+            
+        # 既存の設定値を反映
+        curr_cls_str = str(s.get("alert_target_classes", "")).strip()
+        if curr_cls_str and curr_cls_str != "すべてのクラス":
+            saved_classes = [c.strip() for c in curr_cls_str.split(",") if c.strip()]
+            for sc in saved_classes:
+                if sc in self._class_vars:
+                    self._class_vars[sc].set(True)
+                    
+        def _upd_alert_classes(*args):
+            selected = [cls for cls, var in self._class_vars.items() if var.get()]
+            s["alert_target_classes"] = ",".join(selected)
             self._mark_changed()
-        v_alert_cls.trace_add("write", _upd_alert_cls)
+            
+        def _select_all_classes():
+            for var in self._class_vars.values():
+                var.set(True)
+            _upd_alert_classes()
+
+        def _deselect_all_classes():
+            for var in self._class_vars.values():
+                var.set(False)
+            _upd_alert_classes()
+
+        btn_sel_all = tk.Button(r_alert_cls_hdr, text="全選択", font=(FONT_FAMILY, 10, "bold"),
+                                bg="#546E7A", fg="white", relief="flat", cursor="hand2", command=_select_all_classes)
+        btn_sel_all.pack(side=tk.LEFT, padx=(10, 5))
+        
+        btn_desel_all = tk.Button(r_alert_cls_hdr, text="全解除", font=(FONT_FAMILY, 10, "bold"),
+                                  bg="#546E7A", fg="white", relief="flat", cursor="hand2", command=_deselect_all_classes)
+        btn_desel_all.pack(side=tk.LEFT, padx=5)
+
+        # スクロール可能なチェックボックスコンテナ
+        r_cls_scroll = _row_frame(g1)
+        cls_canvas = tk.Canvas(r_cls_scroll, height=120, bg=COLOR_BG_PANEL, highlightthickness=1, highlightbackground=COLOR_BORDER)
+        cls_sb = ttk.Scrollbar(r_cls_scroll, orient="vertical", command=cls_canvas.yview)
+        cls_frame = tk.Frame(cls_canvas, bg=COLOR_BG_PANEL)
+        
+        canvas_window = cls_canvas.create_window((0, 0), window=cls_frame, anchor="nw")
+        cls_canvas.configure(yscrollcommand=cls_sb.set)
+        
+        # マウスホイールイベントのバインド
+        def _on_cls_wheel(event):
+            cls_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        cls_canvas.bind("<Enter>", lambda e: cls_canvas.bind_all("<MouseWheel>", _on_cls_wheel))
+        cls_canvas.bind("<Leave>", lambda e: cls_canvas.unbind_all("<MouseWheel>"))
+
+        # スクロール領域のサイズ同期
+        def _on_cls_configure(event=None):
+            cls_canvas.configure(scrollregion=cls_canvas.bbox("all"))
+            cls_canvas.itemconfig(canvas_window, width=cls_canvas.winfo_width())
+            
+        cls_frame.bind("<Configure>", _on_cls_configure)
+        cls_canvas.bind("<Configure>", _on_cls_configure)
+
+        cls_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cls_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # グリッド配置 (4列)
+        cols = 4
+        for idx, cls in enumerate(model_classes):
+            var = self._class_vars[cls]
+            cb = tk.Checkbutton(cls_frame, text=cls, variable=var, font=FONT_SET_VAL,
+                                bg=COLOR_BG_PANEL, fg=COLOR_TEXT_MAIN, selectcolor=COLOR_BG_INPUT,
+                                activebackground=COLOR_BG_PANEL, activeforeground=COLOR_TEXT_MAIN,
+                                relief="flat", anchor="w", command=_upd_alert_classes)
+            cb.grid(row=idx // cols, column=idx % cols, sticky="w", padx=10, pady=2)
+            
+        for c in range(cols):
+            cls_frame.columnconfigure(c, weight=1)
+
+        # 補足説明
+        r_desc = _row_frame(g1)
+        desc_lbl = tk.Label(r_desc, text="※何もチェックしない、またはすべてチェックした場合は「すべてのクラス」が監視対象になります。",
+                            font=(FONT_FAMILY, 11), bg=COLOR_BG_PANEL, fg=COLOR_TEXT_SUB)
+        desc_lbl.pack(side=tk.LEFT)
+
 
         # --- 連続検知フレーム数 (確認フレーム数と統合) ---
         r_alert_confirm = _row_frame(g1)

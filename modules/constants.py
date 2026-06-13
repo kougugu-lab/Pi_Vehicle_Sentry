@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 
 # --- バージョン ---
-VERSION = "v0.1.0"
+VERSION = "v0.1.1"
+
+
 
 
 # 仕様情報遅延キュー中のサイクル（検査SKIP）を表す内部パターンID
