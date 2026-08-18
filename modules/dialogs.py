@@ -319,6 +319,18 @@ class SystemDateTimeDialog(tk.Toplevel):
         sp_s.pack(side=tk.LEFT, padx=4)
         tk.Label(f_time, text="秒", font=font_lbl, bg=COLOR_BG_PANEL, fg=COLOR_TEXT_MAIN).pack(side=tk.LEFT)
 
+        # 全Spinboxの安全停止ハンドラ
+        for sp in [sp_y, sp_m, sp_d, sp_h, sp_mi, sp_s]:
+            def _stop_ttk_sp(event=None, widget=sp):
+                try:
+                    rep = widget.tk.call('set', '::ttk::spinbox::Repeater')
+                    if rep: widget.tk.call('after', 'cancel', rep)
+                except Exception:
+                    pass
+            sp.bind("<ButtonRelease-1>", _stop_ttk_sp, add="+")
+            sp.bind("<Leave>", _stop_ttk_sp, add="+")
+            sp.bind("<FocusOut>", _stop_ttk_sp, add="+")
+
         def _set_current():
             n = datetime.datetime.now()
             self.v_year.set(n.year)
@@ -614,7 +626,21 @@ class SettingsDialog(tk.Toplevel):
     def _spinbox(self, parent, var, from_, to, increment=1, width=6, key_path=None):
         sb = tk.Spinbox(parent, from_=from_, to=to, increment=increment, textvariable=var,
                         font=FONT_SET_VAL, width=width, bg=COLOR_BG_INPUT, fg="white", 
-                        buttonbackground="#78909C", bd=1, relief="solid")
+                        buttonbackground="#78909C", bd=1, relief="solid",
+                        repeatdelay=0, repeatinterval=0)
+        
+        # ラズパイ環境での長押しタイマー暴走を防止する安全ハンドラ
+        def _stop_repeat(event=None):
+            try:
+                rep_id = sb.tk.call('set', '::tk::spinbox::Repeater')
+                if rep_id:
+                    sb.tk.call('after', 'cancel', rep_id)
+            except Exception:
+                pass
+        sb.bind("<ButtonRelease-1>", _stop_repeat, add="+")
+        sb.bind("<Leave>", _stop_repeat, add="+")
+        sb.bind("<FocusOut>", _stop_repeat, add="+")
+
         if key_path:
             def _trace(*args):
                 self._mark_changed()

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 # --- バージョン ---
-VERSION = "v0.2.1"
+VERSION = "v0.2.2"
 
 
 
