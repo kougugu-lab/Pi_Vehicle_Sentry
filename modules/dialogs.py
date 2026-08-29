@@ -462,6 +462,8 @@ class SettingsDialog(tk.Toplevel):
         self.lb_pat = tk.Listbox()  # type: ignore
         
         self.v_ng = tk.StringVar(value=str(self.temp_data["gpio"]["outputs"].get("ng", 20)))
+        reset_val = self.temp_data["gpio"].get("reset_pin", 23)
+        self.v_reset_pin = tk.StringVar(value=str(reset_val if reset_val is not None else 23))
         self._gpio_test_output = None
         self._gpio_test_on = False
 
@@ -597,21 +599,49 @@ class SettingsDialog(tk.Toplevel):
         }
         HelpWindow(self, "詳細設定 操作ガイド", help_data)
 
-    def _get_model_classes(self):
+    def _load_model_classes_for_path(self, path=None, show_feedback=True):
+        """指定パスのモデルをロードしてクラス一覧を更新し、UIに反映する"""
         classes = [""]
-        if not YOLO_AVAILABLE:
+        if path is None:
+            path = self.temp_data.get("inference", {}).get("model_path", "")
+
+        path = str(path).strip()
+        if not path or not os.path.exists(path):
+            self.model_classes = classes
+            if show_feedback and hasattr(self, "lbl_model_status") and self.lbl_model_status.winfo_exists():
+                self.lbl_model_status.config(text="モデル未指定またはファイル/フォルダが存在しません", fg=COLOR_TEXT_SUB)
             return classes
+
+        if not YOLO_AVAILABLE:
+            if show_feedback and hasattr(self, "lbl_model_status") and self.lbl_model_status.winfo_exists():
+                self.lbl_model_status.config(text="YOLO (ultralytics) が利用できないためクラス情報を取得できません", fg=COLOR_WARNING)
+            return classes
+
         try:
-            path = self.temp_data["inference"].get("model_path")
-            if path and os.path.exists(path):
-                # .ptモデルをロードしてクラス名を取得 (設定画面を開くたびに最新のモデル状態を確認するため)
-                model = YOLO(path)
-                names = getattr(model, 'names', {})
-                if names:
-                    classes += sorted(list(names.values()))
-        except Exception:
-            pass
-        return classes
+            is_ncnn = os.path.isdir(path) or path.endswith("_ncnn_model")
+            model = YOLO(path, task="detect") if is_ncnn else YOLO(path)
+            names = getattr(model, 'names', {})
+            if names:
+                classes += sorted(list(names.values()))
+            self.model_classes = classes
+            
+            cls_count = len(classes) - 1
+            sample_str = ", ".join(classes[1:6])
+            if len(classes) > 6:
+                sample_str += "..."
+            status_text = f"モデルロード完了 (検出クラス: {cls_count}種類 [{sample_str}])"
+            
+            if show_feedback and hasattr(self, "lbl_model_status") and self.lbl_model_status.winfo_exists():
+                self.lbl_model_status.config(text=status_text, fg=COLOR_OK)
+            return classes
+        except Exception as e:
+            self.model_classes = classes
+            if show_feedback and hasattr(self, "lbl_model_status") and self.lbl_model_status.winfo_exists():
+                self.lbl_model_status.config(text=f"モデルロード失敗: {e}", fg=COLOR_NG)
+            return classes
+
+    def _get_model_classes(self):
+        return self._load_model_classes_for_path(show_feedback=False)
 
     def _entry(self, parent, var, width=None, key_path=None):
         ent = tk.Entry(parent, textvariable=var, font=FONT_SET_VAL,
@@ -944,6 +974,7 @@ class SettingsDialog(tk.Toplevel):
         self.show_gpio_map(main_f)
         # 初期ハイライト
         self.after(100, self._highlight_ng_pin_on_map)
+        self._start_monitoring()
 
     def _set_active_entry(self, entry, var):
         self.active_entry = (entry, var)
@@ -980,12 +1011,32 @@ class SettingsDialog(tk.Toplevel):
         # タイトル行の右にテスト出力ボタンと現在のピン番号表示を配置
         hdr = tk.Frame(inner, bg=COLOR_BG_PANEL)
         hdr.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(hdr, text="現在の警報出力ピン:", font=FONT_SET_VAL,
-                 bg=COLOR_BG_PANEL, fg=COLOR_TEXT_SUB).pack(side=tk.LEFT)
-        self._lbl_ng_display = tk.Label(hdr, textvariable=self.v_ng,
-                                        font=FONT_SET_VAL, bg=COLOR_BG_PANEL,
-                                        fg=COLOR_ACCENT, width=4, anchor="w")
-        self._lbl_ng_display.pack(side=tk.LEFT, padx=(4, 20))
+
+        # 警報出力
+        f_out_row = tk.Frame(hdr, bg=COLOR_BG_PANEL)
+        f_out_row.pack(side=tk.LEFT, fill=tk.Y)
+        tk.Label(f_out_row, text="警報出力ピン:", font=FONT_SET_VAL,
+                 bg=COLOR_BG_PANEL, fg=COLOR_TEXT_MAIN).pack(side=tk.LEFT)
+        e_ng = self._entry(f_out_row, self.v_ng, width=5, key_path="gpio.outputs.ng")
+        e_ng.pack(side=tk.LEFT, padx=(4, 20))
+        e_ng.bind("<FocusIn>", lambda ev: self._set_active_entry(e_ng, self.v_ng))
+        Tooltip(e_ng, "車両検知（警報）時にON信号を出すGPIOピン番号 (BCM番号) です。")
+
+        # NGリセット入力 (ランプ左端配置)
+        f_rst_row = tk.Frame(hdr, bg=COLOR_BG_PANEL)
+        f_rst_row.pack(side=tk.LEFT, fill=tk.Y, padx=(10, 0))
+        self.led_reset = tk.Canvas(f_rst_row, width=16, height=16, bg=COLOR_BG_PANEL, highlightthickness=0)
+        self.led_reset.pack(side=tk.LEFT, padx=5)
+        self.circle_reset = self.led_reset.create_oval(2, 2, 14, 14, fill="#333", outline="#555")
+        Tooltip(self.led_reset, "リセットピンの現在の入力状態（通電時に緑色点灯）です。")
+
+        tk.Label(f_rst_row, text="リセットピン:", font=FONT_SET_VAL,
+                 bg=COLOR_BG_PANEL, fg=COLOR_TEXT_MAIN).pack(side=tk.LEFT, padx=(2, 2))
+        e_rst = self._entry(f_rst_row, self.v_reset_pin, width=5, key_path="gpio.reset_pin")
+        e_rst.pack(side=tk.LEFT, padx=4)
+        e_rst.bind("<FocusIn>", lambda ev: self._set_active_entry(e_rst, self.v_reset_pin))
+        Tooltip(e_rst, "外部スイッチ等から警報出力を手動停止/リセットするための入力ピン番号 (BCM番号) です。")
+
         self._btn_gpio_test = tk.Button(hdr, text="テスト出力 (OFF)", font=FONT_BTN_LARGE,
                                         bg="#546E7A", fg="white", relief="flat",
                                         command=self.toggle_gpio_test)
@@ -993,8 +1044,12 @@ class SettingsDialog(tk.Toplevel):
         Tooltip(self._btn_gpio_test, "押すたびに警報出力ピンをON/OFF切り替えます。")
 
         def _on_pin_clicked(bcm_val):
-            # マップクリックで直接 v_ng にセット
-            self.v_ng.set(str(bcm_val))
+            widget, var = getattr(self, "active_entry", (None, None))
+            if widget and var and bcm_val is not None:
+                var.set(str(bcm_val))
+                widget.focus_set()
+            elif bcm_val is not None:
+                self.v_ng.set(str(bcm_val))
             self._mark_changed()
 
         
@@ -1768,24 +1823,63 @@ class SettingsDialog(tk.Toplevel):
         _lbl(r_mdl, "AIモデルパス:",
              "推論に使用するYOLOモデルを指定します。\n"
              "・.pt ファイル: 「.pt参照」ボタンでファイルを選択\n"
-             "・ncnnモデル: 「ncnnフォルダ参照」ボタンでフォルダを選択")
+             "・ncnnモデル: 「ncnnフォルダ参照」ボタンでフォルダを選択\n"
+             "※選択完了後、自動的にモデルがロードされ検出クラスが更新されます。")
         vm = tk.StringVar(value=s.get("model_path", ""))
         _entry_w(r_mdl, vm, width=35)
-        # .pt ファイル選択ボタン
-        _browse_btn(r_mdl, vm, mode="file",
-                    filetypes=[("PyTorch モデル", "*.pt"), ("すべてのファイル", "*.*")])
-        # ncnn フォルダ選択ボタン
+
+        def _on_model_picked(p):
+            if p:
+                vm.set(p)
+                s["model_path"] = p
+                self._load_model_classes_for_path(p, show_feedback=True)
+                self._mark_changed()
+
+        def _pick_pt():
+            p = filedialog.askopenfilename(
+                title="YOLOモデルファイルを選択",
+                parent=self,
+                filetypes=[("PyTorch モデル", "*.pt"), ("すべてのファイル", "*.*")])
+            if p:
+                _on_model_picked(p)
+
+        btn_pt = tk.Button(r_mdl, text=".pt参照", font=FONT_NORMAL,
+                           bg=COLOR_BG_INPUT, fg=COLOR_ACCENT,
+                           relief="flat", padx=6, pady=2, cursor="hand2",
+                           command=_pick_pt)
+        btn_pt.pack(side=tk.LEFT, padx=(6, 0))
+        Tooltip(btn_pt, "PyTorch形式のモデルファイル(*.pt)を選択します (選択完了後、自動ロードされます)")
+
         def _pick_ncnn():
             p = filedialog.askdirectory(title="ncnnモデルフォルダを選択", parent=self)
             if p:
-                vm.set(p)
+                _on_model_picked(p)
+
         btn_ncnn = tk.Button(r_mdl, text="ncnnフォルダ", font=FONT_NORMAL,
                              bg=COLOR_BG_INPUT, fg=COLOR_ACCENT,
                              relief="flat", padx=6, pady=2, cursor="hand2",
                              command=_pick_ncnn)
         btn_ncnn.pack(side=tk.LEFT, padx=(4, 0))
-        Tooltip(btn_ncnn, "ncnn形式のモデルフォルダ(*.ncnnディレクトリ)を選択します")
-        vm.trace_add("write", lambda *a: s.update({"model_path": vm.get()}))
+        Tooltip(btn_ncnn, "ncnn形式のモデルフォルダ(*.ncnnディレクトリ)を選択します (選択完了後、自動ロードされます)")
+
+        # モデルステータス表示行
+        r_mdl_st = tk.Frame(g3, bg=COLOR_BG_PANEL)
+        r_mdl_st.pack(fill=tk.X, pady=(2, 6), padx=10)
+        self.lbl_model_status = tk.Label(r_mdl_st, text="", font=(FONT_FAMILY, 11),
+                                         bg=COLOR_BG_PANEL, fg=COLOR_TEXT_SUB, anchor="w")
+        self.lbl_model_status.pack(fill=tk.X)
+
+        # 初期表示時のモデル情報表示
+        self._load_model_classes_for_path(vm.get(), show_feedback=True)
+
+        def _on_entry_changed(*a):
+            p = vm.get().strip()
+            s["model_path"] = p
+            if os.path.exists(p):
+                self._load_model_classes_for_path(p, show_feedback=True)
+            self._mark_changed()
+
+        vm.trace_add("write", _on_entry_changed)
 
         # グループ 3b: 撮影モード設定
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1915,18 +2009,51 @@ class SettingsDialog(tk.Toplevel):
 
     # ---- 保存 / GPIO テスト ----
 
+    def _start_monitoring(self):
+        if not self.winfo_exists():
+            return
+        if not hasattr(self, "t_gpio") or not self.t_gpio.winfo_exists():
+            return
+
+        app = getattr(self.master, "app_instance", None)
+        app_inputs = getattr(app, "inputs", {})
+        if "reset" in app_inputs and hasattr(self, "led_reset") and hasattr(self, "circle_reset") and self.led_reset.winfo_exists():
+            state = app_inputs["reset"].is_active
+            self.led_reset.itemconfig(self.circle_reset, fill=COLOR_OK if state else "#333")
+
+        self.after(200, self._start_monitoring)
+
     def validate_pins(self):
-        """NG出力ピン番号のバリデーション"""
+        """NG出力ピンおよびリセットピン番号のバリデーションと重複チェック"""
         try:
             ng_pin = int(str(self.v_ng.get()).strip())
         except (ValueError, tk.TclError):
-            messagebox.showerror("バリデーションエラー", "NG出力ピンには有効な数値を入力してください", parent=self)
+            messagebox.showerror("バリデーションエラー", "警報出力ピンには有効な数値を入力してください", parent=self)
             return False
         if ng_pin not in VALID_BCM_PINS:
             messagebox.showerror("バリデーションエラー",
-                f"NG出力ピン番号 {ng_pin} は有効なBCMピンではありません\n"
+                f"警報出力ピン番号 {ng_pin} は有効なBCMピンではありません\n"
                 f"有効なピン: {sorted(VALID_BCM_PINS)}", parent=self)
             return False
+
+        reset_str = self.v_reset_pin.get().strip()
+        if reset_str:
+            try:
+                reset_p = int(reset_str)
+                if reset_p not in VALID_BCM_PINS:
+                    messagebox.showerror("バリデーションエラー",
+                        f"NGリセット入力ピン番号 {reset_p} は有効なBCMピンではありません\n"
+                        f"有効なピン: {sorted(VALID_BCM_PINS)}", parent=self)
+                    return False
+                if reset_p == ng_pin:
+                    messagebox.showerror("バリデーションエラー", f"警報出力ピンとNGリセットピン ({reset_p}) が重複しています", parent=self)
+                    return False
+                self.temp_data["gpio"]["reset_pin"] = reset_p
+            except ValueError:
+                messagebox.showerror("バリデーションエラー", "NGリセットピン番号が無効です。半角数字で入力してください。", parent=self)
+                return False
+        else:
+            self.temp_data["gpio"]["reset_pin"] = None
         return True
 
     def _validate_delay_cycles(self):

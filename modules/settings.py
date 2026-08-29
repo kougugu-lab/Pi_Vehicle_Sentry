@@ -19,7 +19,8 @@ class SettingsManager:
                 {"id": "cam_1", "name": "カメラ 1", "index": 0}
             ],
             "gpio": {
-                "outputs": {"ng": 20}
+                "outputs": {"ng": 20},
+                "reset_pin": 23
             },
             "inference": {
                 "threshold": 0.5,

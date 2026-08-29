@@ -24,7 +24,7 @@ from .constants import (
     COLOR_TEXT_MAIN, COLOR_TEXT_SUB, COLOR_ACCENT, COLOR_OK, COLOR_NG, COLOR_WARNING,
     FONT_BOLD, FONT_LARGE, FONT_NORMAL, FONT_FAMILY, VERSION
 )
-from .hardware import OutputDevice, is_gpio_available, MockManager
+from .hardware import DigitalInputDevice, OutputDevice, is_gpio_available, MockManager
 from .settings import SettingsManager
 from .widgets import create_card, Tooltip, HelpWindow, TenKeyDialog, get_commit_display_style
 from .dialogs import SettingsDialog, _activate_toplevel
@@ -540,7 +540,15 @@ class InspectionSystem:
                 self.logger.info(f"カメラ(インデックス {cam['index']})を初期化しました: {cam['name']}")
             else:
                 self.logger.error(f"カメラ(インデックス {cam['index']})を開けませんでした")
-            # 既存の out_ng を安全にクローズして解放
+            # 既存の out_ng, inputs を安全にクローズして解放
+            if hasattr(self, "inputs"):
+                for d in self.inputs.values():
+                    try:
+                        d.close()
+                    except Exception:
+                        pass
+            self.inputs = {}
+
             if hasattr(self, "out_ng") and self.out_ng is not None:
                 try:
                     self.out_ng.off()
@@ -548,7 +556,21 @@ class InspectionSystem:
                 except Exception:
                     pass
                 self.out_ng = None
-            # NG出力のみ
+
+            # NGリセット入力
+            reset_pin = data.get("gpio", {}).get("reset_pin")
+            if reset_pin:
+                try:
+                    pin_num = int(reset_pin)
+                    if pin_num > 0:
+                        dev_reset = DigitalInputDevice(pin_num, pull_up=True, bounce_time=0.05)
+                        dev_reset.when_activated = self.stop_buzzer
+                        self.inputs["reset"] = dev_reset
+                        self.logger.info(f"NGリセット入力ピン初期化: BCM {pin_num}")
+                except Exception as e:
+                    self.logger.error(f"NGリセット入力ピン初期化失敗: {e}")
+
+            # NG出力
             self.out_ng = OutputDevice(data["gpio"]["outputs"]["ng"])
         except Exception as e:
             self.logger.error(f"ハードウェアエラー: {e}")
@@ -871,9 +893,13 @@ class InspectionSystem:
             self.logger.error(f"初期コミット番号設定エラー: {e}")
 
     def stop_buzzer(self):
-        """NG出力（警報出力）を停止する"""
+        """NG出力（警報出力）を停止する（画面ボタンクリックまたはGPIOリセット入力）"""
         if self.out_ng:
-            self.out_ng.off()
+            try:
+                self.out_ng.off()
+            except Exception:
+                pass
+        self.logger.info("NG警報出力を停止しました（手動/GPIOリセット）")
 
     def trigger_manual_capture(self):
         """撮影モード時の手動トリガーボタン"""
@@ -1033,6 +1059,7 @@ class InspectionSystem:
         self._settings_dialog = None
         self.logger.info("設定画面が閉じられました。検査処理を再開します。")
         self.setup_hardware()
+        self.load_model()
         self.v_mode.set(self.settings.data["inference"].get("mode", "inspection"))
         self.update_commit_display()
         self.update_mode_ui()
